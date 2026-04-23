@@ -438,6 +438,52 @@
       66%  { content: ' ···'; }
     }
 
+    /* Per-card stats */
+    .card-stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+
+    .card-stat {
+      background: rgba(0,0,0,0.2);
+      border: 1px solid var(--border);
+      padding: 8px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    .cstat-label {
+      font-size: 9px;
+      letter-spacing: 2px;
+      color: var(--muted);
+      text-transform: uppercase;
+    }
+
+    .cstat-track {
+      height: 3px;
+      background: var(--border);
+      overflow: hidden;
+    }
+
+    .cstat-fill {
+      height: 100%;
+      width: 0%;
+      background: var(--green);
+      transition: width 0.6s ease, background 0.4s;
+    }
+
+    .cstat-value {
+      font-size: 10px;
+      color: var(--accent);
+      letter-spacing: 0.5px;
+    }
+
+    .cstat-value.warn   { color: var(--yellow); }
+    .cstat-value.danger { color: var(--red); }
+
     /* Logs modal */
     #logs-modal {
       display: none;
@@ -552,12 +598,77 @@
     #toast.success { border-color: var(--green); color: var(--green); }
     #toast.error   { border-color: var(--red); color: var(--red); }
 
+    /* Docker stats bar */
+    .stats-bar {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0;
+      padding: 10px 28px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(0,0,0,0.15);
+    }
+
+    .stats-bar-title {
+      font-family: var(--display);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 3px;
+      color: var(--muted);
+      text-transform: uppercase;
+      margin-right: 24px;
+      white-space: nowrap;
+    }
+
+    .stat-block {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 20px;
+      border-left: 1px solid var(--border);
+    }
+
+    .stat-label {
+      font-size: 9px;
+      letter-spacing: 2px;
+      color: var(--muted);
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .stat-track {
+      width: 60px;
+      height: 4px;
+      background: var(--border);
+      overflow: hidden;
+    }
+
+    .stat-fill {
+      height: 100%;
+      width: 0%;
+      background: var(--green);
+      transition: width 0.6s ease, background 0.4s;
+    }
+
+    .stat-value {
+      font-size: 12px;
+      color: var(--accent);
+      text-shadow: 0 0 8px rgba(0,229,255,0.35);
+      white-space: nowrap;
+      min-width: 6ch;
+    }
+
+    .stat-value.warn  { color: var(--yellow); text-shadow: 0 0 8px rgba(255,204,0,0.35); }
+    .stat-value.danger { color: var(--red);   text-shadow: 0 0 8px rgba(255,56,96,0.35); }
+
     /* Responsive */
     @media (max-width: 600px) {
       header { padding: 14px 16px; flex-direction: column; align-items: flex-start; gap: 10px; }
       .logo-title { font-size: 26px; }
       main { padding: 16px; }
       .toolbar { padding: 10px 16px; }
+      .stats-bar { padding: 8px 16px; }
+      .stat-block { padding: 0 12px; }
       #container-grid { grid-template-columns: 1fr; }
     }
   </style>
@@ -577,6 +688,24 @@
     <div id="clock"></div>
   </div>
 </header>
+
+<div class="stats-bar">
+  <div class="stats-bar-title">Docker Stats</div>
+  <div class="stat-block">
+    <span class="stat-label">CPU</span>
+    <div class="stat-track"><div class="stat-fill" id="cpu-fill"></div></div>
+    <span class="stat-value" id="stat-cpu">—</span>
+  </div>
+  <div class="stat-block">
+    <span class="stat-label">Memory</span>
+    <div class="stat-track"><div class="stat-fill" id="mem-fill"></div></div>
+    <span class="stat-value" id="stat-mem">—</span>
+  </div>
+  <div class="stat-block">
+    <span class="stat-label">Containers</span>
+    <span class="stat-value" id="stat-containers">—</span>
+  </div>
+</div>
 
 <div class="toolbar">
   <div class="toolbar-left">
@@ -612,6 +741,7 @@
 <script>
   let apps = [];
   let refreshTimer = null;
+  let statsData = {}; // byContainer map from last /api/stats response
 
   // --- Clock ---
   function updateClock() {
@@ -715,6 +845,18 @@
             <div class="meta-value">${escHtml(svc.status || '—')}</div>
           </div>
         </div>
+        <div class="card-stats" data-container="${escHtml(svc.containerName || '')}" data-app="${escHtml(appName)}" data-svc="${escHtml(svc.name)}">
+          <div class="card-stat">
+            <span class="cstat-label">CPU</span>
+            <div class="cstat-track"><div class="cstat-fill"></div></div>
+            <span class="cstat-value">—</span>
+          </div>
+          <div class="card-stat">
+            <span class="cstat-label">Memory</span>
+            <div class="cstat-track"><div class="cstat-fill"></div></div>
+            <span class="cstat-value">—</span>
+          </div>
+        </div>
         <div class="card-actions">
           <button class="btn btn-start"
             onclick="serviceAction('start','${escHtml(appName)}','${escHtml(svc.name)}')"
@@ -756,6 +898,7 @@
         </div>
       `;
     }).join('');
+    updateCardStats();
   }
 
   // --- Global start/stop all apps ---
@@ -836,6 +979,82 @@
     return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
 
+  // --- Docker stats ---
+
+  function findContainerStats(containerName, appName, svcName) {
+    // Direct lookup using the name docker compose ps reported
+    if (containerName && statsData[containerName]) return statsData[containerName];
+
+    // Fallback: pattern-based guessing for containers not yet started
+    const app = appName.toLowerCase();
+    const svc = svcName.toLowerCase();
+    const candidates = [
+      `${app}-${svc}-1`, `${app}_${svc}_1`,
+      `${app}-${svc}`,   `${app}_${svc}`,
+      `${svc}-1`,        `${svc}_1`,
+    ];
+    for (const c of candidates) {
+      if (statsData[c]) return statsData[c];
+    }
+    const p1 = `${app}-${svc}`, p2 = `${app}_${svc}`;
+    for (const [k, v] of Object.entries(statsData)) {
+      if (k.startsWith(p1) || k.startsWith(p2)) return v;
+    }
+    return null;
+  }
+
+  function applyStatsColor(fillEl, valueEl, pct) {
+    const color = pct > 85 ? 'var(--red)' : pct > 60 ? 'var(--yellow)' : 'var(--green)';
+    fillEl.style.width = Math.min(pct, 100) + '%';
+    fillEl.style.background = color;
+    valueEl.className = 'cstat-value' + (pct > 85 ? ' danger' : pct > 60 ? ' warn' : '');
+  }
+
+  function updateCardStats() {
+    document.querySelectorAll('.card-stats').forEach(el => {
+      const s = findContainerStats(el.dataset.container, el.dataset.app, el.dataset.svc);
+      if (!s) return;
+      const [cpuFill, memFill] = el.querySelectorAll('.cstat-fill');
+      const [cpuVal, memVal]   = el.querySelectorAll('.cstat-value');
+      cpuVal.textContent = s.cpu.toFixed(1) + '%';
+      memVal.textContent = s.memMB + ' MB (' + s.memPct.toFixed(1) + '%)';
+      applyStatsColor(cpuFill, cpuVal, s.cpu);
+      applyStatsColor(memFill, memVal, s.memPct);
+    });
+  }
+
+  async function fetchStats() {
+    try {
+      const data = await apiFetch('/api/stats');
+      statsData = data.byContainer || {};
+
+      // top-bar aggregates
+      const cpuEl = document.getElementById('stat-cpu');
+      const memEl = document.getElementById('stat-mem');
+      document.getElementById('stat-containers').textContent = data.containers;
+
+      cpuEl.textContent = data.cpu.toFixed(1) + '%';
+      memEl.textContent = data.memMB + ' MB (' + data.memPct.toFixed(1) + '%)';
+
+      const level     = (pct) => pct > 85 ? 'danger' : pct > 60 ? 'warn' : '';
+      const fillColor = (pct) => pct > 85 ? 'var(--red)' : pct > 60 ? 'var(--yellow)' : 'var(--green)';
+      cpuEl.className = 'stat-value ' + level(data.cpu);
+      memEl.className = 'stat-value ' + level(data.memPct);
+      const cpuFill = document.getElementById('cpu-fill');
+      const memFill = document.getElementById('mem-fill');
+      cpuFill.style.width = Math.min(data.cpu, 100) + '%';
+      cpuFill.style.background = fillColor(data.cpu);
+      memFill.style.width = Math.min(data.memPct, 100) + '%';
+      memFill.style.background = fillColor(data.memPct);
+
+      // per-card stats
+      updateCardStats();
+    } catch {
+      document.getElementById('stat-cpu').textContent = 'ERR';
+      document.getElementById('stat-mem').textContent = 'ERR';
+    }
+  }
+
   // --- Auto-refresh every 15 s ---
   function scheduleRefresh() {
     clearTimeout(refreshTimer);
@@ -847,6 +1066,8 @@
   // --- Init ---
   refreshAll().then(scheduleRefresh);
   setInterval(checkHealth, 30000);
+  fetchStats();
+  setInterval(fetchStats, 10000);
 </script>
 </body>
 </html>

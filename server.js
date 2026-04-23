@@ -60,7 +60,7 @@ function getAppDir(appsDir, appName) {
 // Get all services and their current state for one app directory.
 // Uses one SSH call: config --services gives defined services, ps -a gives running state.
 async function getAppServices(appDir) {
-  const cmd = `cd "${appDir}" && sudo docker compose config --services 2>/dev/null && echo '|||' && sudo docker compose ps -a --format "{{.Service}}\t{{.State}}\t{{.Status}}" 2>/dev/null`;
+  const cmd = `cd "${appDir}" && sudo docker compose config --services 2>/dev/null && echo '|||' && sudo docker compose ps -a --format "{{.Service}}\t{{.State}}\t{{.Status}}\t{{.Name}}" 2>/dev/null`;
   const { stdout } = await sshExec(cmd);
 
   const [svcSection = '', psSection = ''] = stdout.split('|||');
@@ -70,13 +70,18 @@ async function getAppServices(appDir) {
   for (const line of psSection.split('\n').filter(Boolean)) {
     const parts = line.split('\t');
     const svc = parts[0]?.trim();
-    if (svc) psMap[svc] = { state: parts[1]?.trim() || 'stopped', status: parts[2]?.trim() || '' };
+    if (svc) psMap[svc] = {
+      state:         parts[1]?.trim() || 'stopped',
+      status:        parts[2]?.trim() || '',
+      containerName: (parts[3]?.trim() || '').toLowerCase(),
+    };
   }
 
   return serviceNames.map(name => ({
     name,
-    state: psMap[name]?.state || 'stopped',
-    status: psMap[name]?.status || 'not started',
+    state:         psMap[name]?.state         || 'stopped',
+    status:        psMap[name]?.status        || 'not started',
+    containerName: psMap[name]?.containerName || '',
   }));
 }
 
@@ -226,6 +231,70 @@ app.get('/api/apps/:appName/services/:service/logs', async (req, res) => {
       `cd "${getAppDir(appsDir, appName)}" && sudo docker compose logs --tail=${lines} ${service} 2>&1`
     );
     res.json({ logs: stdout || stderr || '(no logs)' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Parse Docker memory strings like "234MiB", "1.5GiB", "512kB" to MiB
+function parseDockerMem(str) {
+  const m = (str || '').trim().match(/^([\d.]+)\s*(B|kB|KiB|MB|MiB|GB|GiB|TB|TiB)/i);
+  if (!m) return 0;
+  const v = parseFloat(m[1]);
+  const u = m[2].toLowerCase();
+  if (u === 'b')              return v / (1024 * 1024);
+  if (u === 'kb' || u === 'kib') return v / 1024;
+  if (u === 'mb' || u === 'mib') return v;
+  if (u === 'gb' || u === 'gib') return v * 1024;
+  if (u === 'tb' || u === 'tib') return v * 1024 * 1024;
+  return v;
+}
+
+// GET /api/stats — aggregate CPU % and memory (MiB + %) across all running containers,
+// plus a per-container breakdown keyed by lowercase container name.
+app.get('/api/stats', async (req, res) => {
+  try {
+    const { stdout } = await sshExec(
+      'sudo docker stats --no-stream --format "{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}" 2>/dev/null'
+    );
+    if (!stdout) return res.json({ cpu: 0, memMB: 0, memPct: 0, containers: 0, byContainer: {} });
+
+    let totalCpu = 0;
+    let totalUsedMB = 0;
+    let hostMemMB = 0;
+    let count = 0;
+    const byContainer = {};
+
+    for (const line of stdout.split('\n').filter(Boolean)) {
+      const parts = line.split('\t');
+      if (parts.length < 3) continue;
+      const name   = parts[0].trim().toLowerCase();
+      const cpu    = parseFloat(parts[1]) || 0;
+      const memParts = parts[2].split('/');
+      const usedMB = parseDockerMem(memParts[0]);
+      const limitMB = parseDockerMem(memParts[1]);
+      const memPct = limitMB > 0 ? (usedMB / limitMB) * 100 : 0;
+
+      byContainer[name] = {
+        cpu:   Math.round(cpu * 10) / 10,
+        memMB: Math.round(usedMB),
+        memPct: Math.round(memPct * 10) / 10,
+      };
+
+      totalCpu    += cpu;
+      totalUsedMB += usedMB;
+      if (limitMB > hostMemMB) hostMemMB = limitMB;
+      count++;
+    }
+
+    const memPct = hostMemMB > 0 ? (totalUsedMB / hostMemMB) * 100 : 0;
+    res.json({
+      cpu:         Math.round(totalCpu * 10) / 10,
+      memMB:       Math.round(totalUsedMB),
+      memPct:      Math.round(memPct * 10) / 10,
+      containers:  count,
+      byContainer,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

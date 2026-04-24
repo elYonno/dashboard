@@ -143,6 +143,27 @@
     .toolbar-left {
       display: flex;
       gap: 8px;
+      align-items: center;
+    }
+
+    .toolbar-title {
+      font-family: var(--display);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 3px;
+      color: var(--muted);
+      text-transform: uppercase;
+      width: 90px;
+      flex-shrink: 0;
+    }
+
+    .caddy-status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+      letter-spacing: 1.5px;
+      color: var(--muted);
     }
 
     .btn {
@@ -545,8 +566,8 @@
       font-size: 11px;
       line-height: 1.7;
       color: #8fa8b8;
-      white-space: pre-wrap;
-      word-break: break-all;
+      white-space: pre;
+      overflow-x: auto;
     }
 
     #logs-content::-webkit-scrollbar { width: 6px; }
@@ -693,6 +714,7 @@
       <span id="status-text">CHECKING...</span>
     </div>
     <div id="clock"></div>
+    <button class="btn btn-accent" onclick="refreshAll()">↻ REFRESH</button>
   </div>
 </header>
 
@@ -738,7 +760,23 @@
 
 <div class="toolbar">
   <div class="toolbar-left">
-    <button class="btn btn-accent" onclick="refreshAll()">↻ REFRESH</button>
+    <span class="toolbar-title">Caddy</span>
+    <button class="btn btn-start" id="caddy-btn-start" onclick="caddyAction('start')">▶ START</button>
+    <button class="btn btn-stop" id="caddy-btn-stop" onclick="caddyAction('stop')">■ STOP</button>
+    <button class="btn btn-restart" id="caddy-btn-restart" onclick="caddyAction('restart')">↺ RESTART</button>
+    <button class="btn btn-logs" onclick="openCaddyLogs()">≡ LOGS</button>
+  </div>
+  <div class="toolbar-right">
+    <div class="caddy-status">
+      <div class="status-dot" id="caddy-dot"></div>
+      <span id="caddy-status-text">CHECKING...</span>
+    </div>
+  </div>
+</div>
+
+<div class="toolbar">
+  <div class="toolbar-left">
+    <span class="toolbar-title">Docker</span>
     <button class="btn btn-start" onclick="globalAction('start')">▶ START ALL</button>
     <button class="btn btn-stop" onclick="globalAction('stop')">■ STOP ALL</button>
   </div>
@@ -815,7 +853,7 @@
       const txt = document.getElementById('status-text');
       if (data.connected) {
         dot.className = 'status-dot online';
-        txt.textContent = `CONNECTED · ${data.host}`;
+        txt.textContent = `CONNECTED`;
       } else {
         dot.className = 'status-dot offline';
         txt.textContent = 'DISCONNECTED';
@@ -979,6 +1017,20 @@
   }
 
   // --- Logs ---
+  async function openCaddyLogs() {
+    document.getElementById('logs-title').textContent = 'LOGS · caddy';
+    document.getElementById('logs-content').textContent = 'Fetching logs…';
+    document.getElementById('logs-modal').classList.add('open');
+    try {
+      const data = await apiFetch('/api/caddy/logs?lines=80');
+      document.getElementById('logs-content').textContent = data.logs || '(empty)';
+      const content = document.getElementById('logs-content');
+      content.scrollTop = content.scrollHeight;
+    } catch (err) {
+      document.getElementById('logs-content').textContent = 'Error: ' + err.message;
+    }
+  }
+
   async function openLogs(appName, service) {
     document.getElementById('logs-title').textContent = `LOGS · ${appName} / ${service}`;
     document.getElementById('logs-content').textContent = 'Fetching logs…';
@@ -1006,6 +1058,35 @@
   function escHtml(s) {
     if (!s) return '';
     return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  // --- Caddy service ---
+  async function fetchCaddyStatus() {
+    try {
+      const data = await apiFetch('/api/caddy/status');
+      const dot  = document.getElementById('caddy-dot');
+      const txt  = document.getElementById('caddy-status-text');
+      const isActive = data.status === 'active';
+      dot.className = 'status-dot ' + (isActive ? 'online' : 'offline');
+      txt.textContent = data.status.toUpperCase();
+      document.getElementById('caddy-btn-start').disabled   = isActive;
+      document.getElementById('caddy-btn-stop').disabled    = !isActive;
+      document.getElementById('caddy-btn-restart').disabled = !isActive;
+    } catch { /* silently fail */ }
+  }
+
+  async function caddyAction(action) {
+    const btns = ['caddy-btn-start', 'caddy-btn-stop', 'caddy-btn-restart']
+      .map(id => document.getElementById(id));
+    btns.forEach(b => b.disabled = true);
+    try {
+      const data = await apiFetch(`/api/caddy/${action}`, { method: 'POST' });
+      showToast(data.message || `Caddy ${action} OK`, 'success');
+      setTimeout(fetchCaddyStatus, 800);
+    } catch (err) {
+      showToast(`Caddy ${action} failed: ${err.message}`, 'error');
+      fetchCaddyStatus();
+    }
   }
 
   // --- NAS system stats ---
@@ -1124,6 +1205,8 @@
   // --- Init ---
   refreshAll().then(scheduleRefresh);
   setInterval(checkHealth, 30000);
+  fetchCaddyStatus();
+  setInterval(fetchCaddyStatus, 30000);
   fetchStats();
   setInterval(fetchStats, 10000);
   fetchSystemStats();

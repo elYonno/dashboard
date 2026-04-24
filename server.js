@@ -1,12 +1,48 @@
 require('dotenv').config();
 const express = require('express');
 const { Client } = require('ssh2');
+const { exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Run a command locally (on this Pi), always resolves
+function localExec(command) {
+  return new Promise((resolve) => {
+    exec(command, (error, stdout, stderr) => {
+      resolve({
+        stdout: (stdout || '').trim(),
+        stderr: (stderr || '').trim(),
+        code: error ? (error.code || 1) : 0,
+      });
+    });
+  });
+}
+
+// --- Caddy service routes (local — runs on this Pi) ---
+
+app.get('/api/caddy/status', async (req, res) => {
+  const { stdout } = await localExec('systemctl is-active caddy');
+  res.json({ status: stdout || 'unknown' });
+});
+
+app.get('/api/caddy/logs', async (req, res) => {
+  const lines = parseInt(req.query.lines) || 80;
+  const { stdout, stderr } = await localExec(`journalctl -n ${lines} --no-pager -u caddy`);
+  res.json({ logs: stdout || stderr || '(no logs)' });
+});
+
+app.post('/api/caddy/:action', async (req, res) => {
+  const { action } = req.params;
+  if (!['start', 'stop', 'restart'].includes(action))
+    return res.status(400).json({ error: 'Invalid action' });
+  const { stdout, stderr, code } = await localExec(`sudo systemctl ${action} caddy`);
+  if (code !== 0) return res.status(500).json({ error: stderr || stdout || `${action} failed` });
+  res.json({ success: true, message: `Caddy ${action}ed` });
+});
 
 // --- SSH config ---
 function getSshConfig() {

@@ -236,6 +236,46 @@ app.get('/api/apps/:appName/services/:service/logs', async (req, res) => {
   }
 });
 
+// GET /api/system — NAS host stats: RAM, uptime, CPU %, CPU temperature
+app.get('/api/system', async (req, res) => {
+  try {
+    const cmd = [
+      // RAM total + used in MB
+      `free -m | awk 'NR==2{print $2,$3}'`,
+      // ZFS ARC size in MB (reclaimable cache — excluded from "used")
+      `awk '/^size[[:space:]]/{printf "%.0f",$3/1024/1024}' /proc/spl/kstat/zfs/arcstats 2>/dev/null || echo 0`,
+      // Uptime in whole seconds
+      `awk '{print int($1)}' /proc/uptime`,
+      // Instantaneous CPU usage % from /proc/stat
+      `awk '/^cpu /{idle=$5+$6; t=0; for(i=2;i<=NF;i++) t+=$i; printf "%.1f",(t>0)?(t-idle)*100/t:0; exit}' /proc/stat`,
+      // CPU temperature — try hwmon first (coretemp/k10temp), fall back to thermal_zone
+      `f=$(ls /sys/class/hwmon/hwmon*/temp1_input 2>/dev/null | head -1); [ -n "$f" ] && awk '{printf "%.0f",$1/1000}' "$f" 2>/dev/null || awk '{printf "%.0f",$1/1000}' /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo 0`,
+    ].join(' && echo "|||" && ');
+
+    const { stdout } = await sshExec(cmd);
+    const parts = stdout.split('|||').map(s => s.trim());
+
+    const [totalStr, usedStr] = (parts[0] || '').split(/\s+/);
+    const arcMB    = parseInt(parts[1]) || 0;
+    const uptimeSec = parseInt(parts[2]) || 0;
+    const cpu  = parseFloat(parts[3]) || 0;
+    const temp = parseInt(parts[4]) || 0;
+
+    const ramTotal = parseInt(totalStr) || 0;
+    const ramUsed  = Math.max(0, (parseInt(usedStr) || 0) - arcMB);
+    const ramPct   = ramTotal > 0 ? Math.round((ramUsed / ramTotal) * 100) : 0;
+
+    const d = Math.floor(uptimeSec / 86400);
+    const h = Math.floor((uptimeSec % 86400) / 3600);
+    const m = Math.floor((uptimeSec % 3600) / 60);
+    const uptime = d > 0 ? `${d}d ${h}h ${m}m` : h > 0 ? `${h}h ${m}m` : `${m}m`;
+
+    res.json({ ramTotal, ramUsed, ramPct, uptime, cpu, temp });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Parse Docker memory strings like "234MiB", "1.5GiB", "512kB" to MiB
 function parseDockerMem(str) {
   const m = (str || '').trim().match(/^([\d.]+)\s*(B|kB|KiB|MB|MiB|GB|GiB|TB|TiB)/i);

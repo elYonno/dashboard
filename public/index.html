@@ -616,7 +616,8 @@
       letter-spacing: 3px;
       color: var(--muted);
       text-transform: uppercase;
-      margin-right: 24px;
+      width: 90px;
+      flex-shrink: 0;
       white-space: nowrap;
     }
 
@@ -634,6 +635,8 @@
       color: var(--muted);
       text-transform: uppercase;
       white-space: nowrap;
+      min-width: 52px;
+      flex-shrink: 0;
     }
 
     .stat-track {
@@ -648,6 +651,10 @@
       width: 0%;
       background: var(--green);
       transition: width 0.6s ease, background 0.4s;
+    }
+
+    .stats-bar .stat-block:nth-child(3) .stat-value {
+      min-width: 130px;
     }
 
     .stat-value {
@@ -688,6 +695,28 @@
     <div id="clock"></div>
   </div>
 </header>
+
+<div class="stats-bar">
+  <div class="stats-bar-title">Performance</div>
+  <div class="stat-block">
+    <span class="stat-label">CPU</span>
+    <div class="stat-track"><div class="stat-fill" id="sys-cpu-fill"></div></div>
+    <span class="stat-value" id="sys-cpu">—</span>
+  </div>
+  <div class="stat-block">
+    <span class="stat-label">RAM</span>
+    <div class="stat-track"><div class="stat-fill" id="sys-ram-fill"></div></div>
+    <span class="stat-value" id="sys-ram">—</span>
+  </div>
+  <div class="stat-block">
+    <span class="stat-label">Temp</span>
+    <span class="stat-value" id="sys-temp">—</span>
+  </div>
+  <div class="stat-block">
+    <span class="stat-label">Uptime</span>
+    <span class="stat-value" id="sys-uptime">—</span>
+  </div>
+</div>
 
 <div class="stats-bar">
   <div class="stats-bar-title">Docker Stats</div>
@@ -979,6 +1008,35 @@
     return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
 
+  // --- NAS system stats ---
+  async function fetchSystemStats() {
+    try {
+      const d = await apiFetch('/api/system');
+      const level     = (pct) => pct > 85 ? ' danger' : pct > 60 ? ' warn' : '';
+      const fillColor = (pct) => pct > 85 ? 'var(--red)' : pct > 60 ? 'var(--yellow)' : 'var(--green)';
+
+      const cpuEl = document.getElementById('sys-cpu');
+      cpuEl.textContent = d.cpu.toFixed(1) + '%';
+      cpuEl.className = 'stat-value' + level(d.cpu);
+      const cpuFill = document.getElementById('sys-cpu-fill');
+      cpuFill.style.width = Math.min(d.cpu, 100) + '%';
+      cpuFill.style.background = fillColor(d.cpu);
+
+      const tempEl = document.getElementById('sys-temp');
+      tempEl.textContent = d.temp > 0 ? d.temp + '°C' : '—';
+      tempEl.className = 'stat-value' + (d.temp > 85 ? ' danger' : d.temp > 70 ? ' warn' : '');
+
+      const ramEl = document.getElementById('sys-ram');
+      ramEl.textContent = `${d.ramUsed} MB (${d.ramPct}%)`;
+      ramEl.className = 'stat-value' + level(d.ramPct);
+      const ramFill = document.getElementById('sys-ram-fill');
+      ramFill.style.width = Math.min(d.ramPct, 100) + '%';
+      ramFill.style.background = fillColor(d.ramPct);
+
+      document.getElementById('sys-uptime').textContent = d.uptime;
+    } catch { /* silently fail */ }
+  }
+
   // --- Docker stats ---
 
   function findContainerStats(containerName, appName, svcName) {
@@ -1068,6 +1126,8 @@
   setInterval(checkHealth, 30000);
   fetchStats();
   setInterval(fetchStats, 10000);
+  fetchSystemStats();
+  setInterval(fetchSystemStats, 15000);
 </script>
 </body>
 </html>

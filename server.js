@@ -44,6 +44,22 @@ app.post('/api/caddy/:action', async (req, res) => {
   res.json({ success: true, message: `Caddy ${action}ed` });
 });
 
+// --- Public IPv4 of this device (runs on this Pi, cached) ---
+const PUBLIC_IP_TTL_MS = 5 * 60 * 1000;
+let publicIpCache = { ip: null, fetchedAt: 0 };
+
+app.get('/api/public-ip', async (req, res) => {
+  if (publicIpCache.ip && Date.now() - publicIpCache.fetchedAt < PUBLIC_IP_TTL_MS)
+    return res.json({ ip: publicIpCache.ip });
+
+  const { stdout } = await localExec('curl -4 -s --max-time 5 https://ifconfig.me');
+  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(stdout))
+    return res.status(502).json({ error: 'Could not determine public IPv4' });
+
+  publicIpCache = { ip: stdout, fetchedAt: Date.now() };
+  res.json({ ip: stdout });
+});
+
 // --- SSH config ---
 function getSshConfig() {
   const keyPath = process.env.TRUENAS_KEY_PATH || path.join(process.env.HOME, '.ssh', 'id_rsa');

@@ -120,7 +120,7 @@
       box-shadow: 0 0 8px var(--red);
     }
 
-    #clock {
+    #clock, #public-ip {
       font-size: 11px;
       color: var(--muted);
       letter-spacing: 1px;
@@ -713,6 +713,7 @@
       <div class="status-dot" id="status-dot"></div>
       <span id="status-text">CHECKING...</span>
     </div>
+    <div id="public-ip" title="Public IPv4 of this device">IP —</div>
     <div id="clock"></div>
     <button class="btn btn-accent" onclick="refreshAll()">↻ REFRESH</button>
   </div>
@@ -817,6 +818,16 @@
   }
   setInterval(updateClock, 1000);
   updateClock();
+
+  // --- Public IPv4 of this device ---
+  async function fetchPublicIp() {
+    try {
+      const d = await apiFetch('/api/public-ip');
+      document.getElementById('public-ip').textContent = 'IP ' + d.ip;
+    } catch {
+      document.getElementById('public-ip').textContent = 'IP —';
+    }
+  }
 
   // --- Toast ---
   function showToast(msg, type = 'info') {
@@ -1211,6 +1222,8 @@
   setInterval(fetchStats, 10000);
   fetchSystemStats();
   setInterval(fetchSystemStats, 15000);
+  fetchPublicIp();
+  setInterval(fetchPublicIp, 60000);
 </script>
 </body>
 </html>

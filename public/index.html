@@ -925,11 +925,11 @@
       `<span>${running}</span> running · <span>${total}</span> total`;
   }
 
-  function serviceCardHtml(appName, svc) {
+  function serviceCardHtml(host, appName, svc) {
     const isRunning = svc.state === 'running';
     const isStopped = svc.state === 'stopped';
     const stateClass = svc.state || 'stopped';
-    const cardId = `card-${CSS.escape(appName + '/' + svc.name)}`;
+    const cardId = `card-${CSS.escape(host + '/' + appName + '/' + svc.name)}`;
 
     return `
       <div class="card ${stateClass}" id="${cardId}">
@@ -959,13 +959,13 @@
         </div>
         <div class="card-actions">
           <button class="btn btn-start"
-            onclick="serviceAction('start','${escHtml(appName)}','${escHtml(svc.name)}')"
+            onclick="serviceAction('start','${escHtml(host)}','${escHtml(appName)}','${escHtml(svc.name)}')"
             ${isRunning ? 'disabled' : ''}>▶ START</button>
           <button class="btn btn-stop"
-            onclick="serviceAction('stop','${escHtml(appName)}','${escHtml(svc.name)}')"
+            onclick="serviceAction('stop','${escHtml(host)}','${escHtml(appName)}','${escHtml(svc.name)}')"
             ${isStopped ? 'disabled' : ''}>■ STOP</button>
           <button class="btn btn-logs"
-            onclick="openLogs('${escHtml(appName)}','${escHtml(svc.name)}')">≡ LOGS</button>
+            onclick="openLogs('${escHtml(host)}','${escHtml(appName)}','${escHtml(svc.name)}')">≡ LOGS</button>
         </div>
       </div>
     `;
@@ -983,15 +983,15 @@
       const total = (app.services || []).length;
       const allRunning = running === total && total > 0;
       const allStopped = running === 0;
-      const cards = (app.services || []).map(svc => serviceCardHtml(app.name, svc)).join('');
+      const cards = (app.services || []).map(svc => serviceCardHtml(app.host, app.name, svc)).join('');
       return `
-        <div class="app-group">
+        <div class="app-group" data-key="${escHtml(app.host + '/' + app.name)}">
           <div class="app-group-header">
             <span class="group-name">${escHtml(app.name)}</span>
-            <span class="group-count">${running}/${total} running</span>
-            <button class="btn btn-start" onclick="groupAction('start','${escHtml(app.name)}')"
+            <span class="group-count">${escHtml(app.hostLabel)} · ${running}/${total} running</span>
+            <button class="btn btn-start" onclick="groupAction('start','${escHtml(app.host)}','${escHtml(app.name)}')"
               ${allRunning ? 'disabled' : ''}>▶ START ALL</button>
-            <button class="btn btn-stop" onclick="groupAction('stop','${escHtml(app.name)}')"
+            <button class="btn btn-stop" onclick="groupAction('stop','${escHtml(app.host)}','${escHtml(app.name)}')"
               ${allStopped ? 'disabled' : ''}>■ STOP ALL</button>
           </div>
           <div class="service-grid">${cards}</div>
@@ -1016,13 +1016,12 @@
   }
 
   // --- Group start/stop (all services in one app) ---
-  async function groupAction(action, appName) {
-    const group = [...document.querySelectorAll('.app-group')]
-      .find(g => g.querySelector('.group-name')?.textContent === appName);
+  async function groupAction(action, host, appName) {
+    const group = document.querySelector(`.app-group[data-key="${CSS.escape(host + '/' + appName)}"]`);
     const btns = group ? group.querySelectorAll('.app-group-header .btn, .card-actions .btn') : [];
     btns.forEach(b => b.disabled = true);
     try {
-      const data = await apiFetch(`/api/apps/${encodeURIComponent(appName)}/${action}`, { method: 'POST' });
+      const data = await apiFetch(`/api/apps/${encodeURIComponent(appName)}/${action}?host=${encodeURIComponent(host)}`, { method: 'POST' });
       showToast(data.message || `${action} OK`, 'success');
       setTimeout(refreshAll, 800);
     } catch (err) {
@@ -1032,14 +1031,14 @@
   }
 
   // --- Service actions ---
-  async function serviceAction(action, appName, service) {
-    const cardId = 'card-' + CSS.escape(appName + '/' + service);
+  async function serviceAction(action, host, appName, service) {
+    const cardId = 'card-' + CSS.escape(host + '/' + appName + '/' + service);
     const card = document.getElementById(cardId);
     const btns = card ? card.querySelectorAll('.card-actions .btn') : [];
     btns.forEach(b => b.disabled = true);
 
     try {
-      const url = `/api/apps/${encodeURIComponent(appName)}/services/${encodeURIComponent(service)}/${action}`;
+      const url = `/api/apps/${encodeURIComponent(appName)}/services/${encodeURIComponent(service)}/${action}?host=${encodeURIComponent(host)}`;
       const data = await apiFetch(url, { method: 'POST' });
       showToast(data.message || `${action} OK`, 'success');
       setTimeout(refreshAll, 800);
@@ -1064,12 +1063,12 @@
     }
   }
 
-  async function openLogs(appName, service) {
-    document.getElementById('logs-title').textContent = `LOGS · ${appName} / ${service}`;
+  async function openLogs(host, appName, service) {
+    document.getElementById('logs-title').textContent = `LOGS · ${host} · ${appName} / ${service}`;
     document.getElementById('logs-content').textContent = 'Fetching logs…';
     document.getElementById('logs-modal').classList.add('open');
     try {
-      const url = `/api/apps/${encodeURIComponent(appName)}/services/${encodeURIComponent(service)}/logs?lines=80`;
+      const url = `/api/apps/${encodeURIComponent(appName)}/services/${encodeURIComponent(service)}/logs?lines=80&host=${encodeURIComponent(host)}`;
       const data = await apiFetch(url);
       document.getElementById('logs-content').textContent = data.logs || '(empty)';
       const content = document.getElementById('logs-content');

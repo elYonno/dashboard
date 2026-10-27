@@ -3,6 +3,7 @@ const express = require('express');
 const { Client } = require('ssh2');
 const { exec } = require('child_process');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const app = express();
@@ -100,6 +101,25 @@ function sshExec(command) {
   });
 }
 
+// Compose hosts the dashboard manages. `exec` runs a shell command on that host.
+const HOSTS = {
+  nas: { id: 'nas', label: 'NAS', exec: sshExec,   appsDir: () => process.env.COMPOSE_APPS_DIR },
+  pi:  { id: 'pi',  label: 'Pi',  exec: localExec, appsDir: () => process.env.LOCAL_COMPOSE_APPS_DIR || os.homedir() },
+};
+
+// Pick the host named in ?host= (defaults to the NAS); sends a 400 and returns null if unknown
+function getHost(req, res) {
+  const host = HOSTS[req.query.host || 'nas'];
+  if (!host) res.status(400).json({ error: 'Invalid host' });
+  return host || null;
+}
+
+function requireAppsDir(host) {
+  const appsDir = host.appsDir();
+  if (!appsDir) throw new Error(`${host.label} apps directory is not configured`);
+  return appsDir;
+}
+
 const VALID_NAME = /^[a-zA-Z0-9_\-]+$/;
 
 // Resolve the working directory for an app by name.
@@ -109,11 +129,15 @@ function getAppDir(appsDir, appName) {
   return appName === rootName ? appsDir : `${appsDir}/${appName}`;
 }
 
+function appDirFor(host, appName) {
+  return getAppDir(requireAppsDir(host), appName);
+}
+
 // Get all services and their current state for one app directory.
-// Uses one SSH call: config --services gives defined services, ps -a gives running state.
-async function getAppServices(appDir) {
+// Uses one call: config --services gives defined services, ps -a gives running state.
+async function getAppServices(execFn, appDir) {
   const cmd = `cd "${appDir}" && sudo docker compose config --services 2>/dev/null && echo '|||' && sudo docker compose ps -a --format "{{.Service}}\t{{.State}}\t{{.Status}}\t{{.Name}}" 2>/dev/null`;
-  const { stdout } = await sshExec(cmd);
+  const { stdout } = await execFn(cmd);
 
   const [svcSection = '', psSection = ''] = stdout.split('|||');
   const serviceNames = svcSection.split('\n').map(s => s.trim()).filter(Boolean);
@@ -137,17 +161,17 @@ async function getAppServices(appDir) {
   }));
 }
 
-// Discover all app names in COMPOSE_APPS_DIR
-async function discoverAppNames(appsDir) {
+// Discover all app names in an apps directory on a host
+async function discoverAppNames(execFn, appsDir) {
   const hasCompose = (dir) =>
     `[ -f "${dir}docker-compose.yml" ] || [ -f "${dir}docker-compose.yaml" ] || [ -f "${dir}compose.yml" ] || [ -f "${dir}compose.yaml" ]`;
 
   const rootName = path.basename(appsDir.replace(/\/+$/, ''));
   const rootDir = appsDir.replace(/\/?$/, '/');
-  const { stdout: rootCheck } = await sshExec(`${hasCompose(rootDir)} && echo yes || echo no`);
+  const { stdout: rootCheck } = await execFn(`${hasCompose(rootDir)} && echo yes || echo no`);
 
   const listCmd = `for d in ${appsDir}/*/; do ${hasCompose('"$d"')} && basename "$d"; done`;
-  const { stdout: dirOut } = await sshExec(listCmd);
+  const { stdout: dirOut } = await execFn(listCmd);
   const subNames = dirOut ? dirOut.split('\n').map(s => s.trim()).filter(Boolean) : [];
 
   return [
@@ -156,33 +180,50 @@ async function discoverAppNames(appsDir) {
   ];
 }
 
+// List every app on one host, with its services
+async function listApps(host) {
+  const appsDir = requireAppsDir(host);
+  const appNames = await discoverAppNames(host.exec, appsDir);
+  return Promise.all(appNames.map(async name => ({
+    name,
+    host: host.id,
+    hostLabel: host.label,
+    services: await getAppServices(host.exec, getAppDir(appsDir, name)),
+  })));
+}
+
+// Run `docker compose <args>` in every app on every host
+async function composeAllApps(args) {
+  await Promise.all(Object.values(HOSTS).map(async host => {
+    const appsDir = requireAppsDir(host);
+    const appNames = await discoverAppNames(host.exec, appsDir);
+    await Promise.all(appNames.map(name =>
+      host.exec(`cd "${getAppDir(appsDir, name)}" && sudo docker compose ${args} 2>&1`)
+    ));
+  }));
+}
+
 // --- API Routes ---
 
-// GET /api/apps — list all compose applications with their services
+// GET /api/apps — list all compose applications on every host
 app.get('/api/apps', async (req, res) => {
-  const appsDir = process.env.COMPOSE_APPS_DIR;
-  if (!appsDir) return res.status(500).json({ error: 'COMPOSE_APPS_DIR not set in .env' });
-
   try {
-    const appNames = await discoverAppNames(appsDir);
-    const apps = await Promise.all(appNames.map(async name => {
-      const services = await getAppServices(getAppDir(appsDir, name));
-      return { name, services };
-    }));
+    const apps = (await Promise.all(Object.values(HOSTS).map(listApps))).flat();
     res.json({ apps });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// POST /api/apps/:appName/start — docker compose up -d (all services)
+// POST /api/apps/:appName/start?host=… — docker compose up -d (all services)
 app.post('/api/apps/:appName/start', async (req, res) => {
+  const host = getHost(req, res);
+  if (!host) return;
   const { appName } = req.params;
   if (!VALID_NAME.test(appName)) return res.status(400).json({ error: 'Invalid app name' });
-  const appsDir = process.env.COMPOSE_APPS_DIR;
   try {
-    const { stdout, stderr, code } = await sshExec(
-      `cd "${getAppDir(appsDir, appName)}" && sudo docker compose up -d 2>&1`
+    const { stdout, stderr, code } = await host.exec(
+      `cd "${appDirFor(host, appName)}" && sudo docker compose up -d 2>&1`
     );
     if (code !== 0) return res.status(500).json({ error: stderr || stdout || 'Start failed' });
     res.json({ success: true, message: `${appName} started` });
@@ -191,14 +232,15 @@ app.post('/api/apps/:appName/start', async (req, res) => {
   }
 });
 
-// POST /api/apps/:appName/stop — docker compose stop (all services)
+// POST /api/apps/:appName/stop?host=… — docker compose stop (all services)
 app.post('/api/apps/:appName/stop', async (req, res) => {
+  const host = getHost(req, res);
+  if (!host) return;
   const { appName } = req.params;
   if (!VALID_NAME.test(appName)) return res.status(400).json({ error: 'Invalid app name' });
-  const appsDir = process.env.COMPOSE_APPS_DIR;
   try {
-    const { stdout, stderr, code } = await sshExec(
-      `cd "${getAppDir(appsDir, appName)}" && sudo docker compose stop 2>&1`
+    const { stdout, stderr, code } = await host.exec(
+      `cd "${appDirFor(host, appName)}" && sudo docker compose stop 2>&1`
     );
     if (code !== 0) return res.status(500).json({ error: stderr || stdout || 'Stop failed' });
     res.json({ success: true, message: `${appName} stopped` });
@@ -207,45 +249,36 @@ app.post('/api/apps/:appName/stop', async (req, res) => {
   }
 });
 
-// POST /api/start-all — start all apps in parallel
+// POST /api/start-all — start all apps on every host in parallel
 app.post('/api/start-all', async (req, res) => {
-  const appsDir = process.env.COMPOSE_APPS_DIR;
-  if (!appsDir) return res.status(500).json({ error: 'COMPOSE_APPS_DIR not set in .env' });
   try {
-    const appNames = await discoverAppNames(appsDir);
-    await Promise.all(appNames.map(name =>
-      sshExec(`cd "${getAppDir(appsDir, name)}" && sudo docker compose up -d 2>&1`)
-    ));
+    await composeAllApps('up -d');
     res.json({ success: true, message: 'All apps started' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// POST /api/stop-all — stop all apps in parallel
+// POST /api/stop-all — stop all apps on every host in parallel
 app.post('/api/stop-all', async (req, res) => {
-  const appsDir = process.env.COMPOSE_APPS_DIR;
-  if (!appsDir) return res.status(500).json({ error: 'COMPOSE_APPS_DIR not set in .env' });
   try {
-    const appNames = await discoverAppNames(appsDir);
-    await Promise.all(appNames.map(name =>
-      sshExec(`cd "${getAppDir(appsDir, name)}" && sudo docker compose stop 2>&1`)
-    ));
+    await composeAllApps('stop');
     res.json({ success: true, message: 'All apps stopped' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// POST /api/apps/:appName/services/:service/start — docker compose up -d <service>
+// POST /api/apps/:appName/services/:service/start?host=… — docker compose up -d <service>
 app.post('/api/apps/:appName/services/:service/start', async (req, res) => {
+  const host = getHost(req, res);
+  if (!host) return;
   const { appName, service } = req.params;
   if (!VALID_NAME.test(appName) || !VALID_NAME.test(service))
     return res.status(400).json({ error: 'Invalid name' });
-  const appsDir = process.env.COMPOSE_APPS_DIR;
   try {
-    const { stdout, stderr, code } = await sshExec(
-      `cd "${getAppDir(appsDir, appName)}" && sudo docker compose up -d ${service} 2>&1`
+    const { stdout, stderr, code } = await host.exec(
+      `cd "${appDirFor(host, appName)}" && sudo docker compose up -d ${service} 2>&1`
     );
     if (code !== 0) return res.status(500).json({ error: stderr || stdout || 'Start failed' });
     res.json({ success: true, message: `${appName}/${service} started` });
@@ -254,15 +287,16 @@ app.post('/api/apps/:appName/services/:service/start', async (req, res) => {
   }
 });
 
-// POST /api/apps/:appName/services/:service/stop — docker compose stop <service>
+// POST /api/apps/:appName/services/:service/stop?host=… — docker compose stop <service>
 app.post('/api/apps/:appName/services/:service/stop', async (req, res) => {
+  const host = getHost(req, res);
+  if (!host) return;
   const { appName, service } = req.params;
   if (!VALID_NAME.test(appName) || !VALID_NAME.test(service))
     return res.status(400).json({ error: 'Invalid name' });
-  const appsDir = process.env.COMPOSE_APPS_DIR;
   try {
-    const { stdout, stderr, code } = await sshExec(
-      `cd "${getAppDir(appsDir, appName)}" && sudo docker compose stop ${service} 2>&1`
+    const { stdout, stderr, code } = await host.exec(
+      `cd "${appDirFor(host, appName)}" && sudo docker compose stop ${service} 2>&1`
     );
     if (code !== 0) return res.status(500).json({ error: stderr || stdout || 'Stop failed' });
     res.json({ success: true, message: `${appName}/${service} stopped` });
@@ -271,16 +305,17 @@ app.post('/api/apps/:appName/services/:service/stop', async (req, res) => {
   }
 });
 
-// GET /api/apps/:appName/services/:service/logs
+// GET /api/apps/:appName/services/:service/logs?host=…
 app.get('/api/apps/:appName/services/:service/logs', async (req, res) => {
+  const host = getHost(req, res);
+  if (!host) return;
   const { appName, service } = req.params;
   const lines = parseInt(req.query.lines) || 80;
   if (!VALID_NAME.test(appName) || !VALID_NAME.test(service))
     return res.status(400).json({ error: 'Invalid name' });
-  const appsDir = process.env.COMPOSE_APPS_DIR;
   try {
-    const { stdout, stderr } = await sshExec(
-      `cd "${getAppDir(appsDir, appName)}" && sudo docker compose logs --tail=${lines} ${service} 2>&1`
+    const { stdout, stderr } = await host.exec(
+      `cd "${appDirFor(host, appName)}" && sudo docker compose logs --tail=${lines} ${service} 2>&1`
     );
     res.json({ logs: stdout || stderr || '(no logs)' });
   } catch (err) {
@@ -357,51 +392,59 @@ function parseDockerMem(str) {
   return v;
 }
 
-// GET /api/stats — aggregate CPU % and memory (MiB + %) across all running containers,
+// Docker stats for one host: aggregate CPU % and memory (MiB + %) across running containers,
 // plus a per-container breakdown keyed by lowercase container name.
+async function dockerStats(execFn) {
+  const { stdout } = await execFn(
+    'sudo docker stats --no-stream --format "{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}" 2>/dev/null'
+  );
+  if (!stdout) return { cpu: 0, memMB: 0, memPct: 0, containers: 0, byContainer: {} };
+
+  let totalCpu = 0;
+  let totalUsedMB = 0;
+  let hostMemMB = 0;
+  let count = 0;
+  const byContainer = {};
+
+  for (const line of stdout.split('\n').filter(Boolean)) {
+    const parts = line.split('\t');
+    if (parts.length < 3) continue;
+    const name   = parts[0].trim().toLowerCase();
+    const cpu    = parseFloat(parts[1]) || 0;
+    const memParts = parts[2].split('/');
+    const usedMB = parseDockerMem(memParts[0]);
+    const limitMB = parseDockerMem(memParts[1]);
+    const memPct = limitMB > 0 ? (usedMB / limitMB) * 100 : 0;
+
+    byContainer[name] = {
+      cpu:   Math.round(cpu * 10) / 10,
+      memMB: Math.round(usedMB),
+      memPct: Math.round(memPct * 10) / 10,
+    };
+
+    totalCpu    += cpu;
+    totalUsedMB += usedMB;
+    if (limitMB > hostMemMB) hostMemMB = limitMB;
+    count++;
+  }
+
+  const memPct = hostMemMB > 0 ? (totalUsedMB / hostMemMB) * 100 : 0;
+  return {
+    cpu:         Math.round(totalCpu * 10) / 10,
+    memMB:       Math.round(totalUsedMB),
+    memPct:      Math.round(memPct * 10) / 10,
+    containers:  count,
+    byContainer,
+  };
+}
+
+// GET /api/stats — totals are NAS-only (the "Docker Stats" bar); byContainer covers both
+// hosts so cards for Pi containers show their CPU and memory too.
 app.get('/api/stats', async (req, res) => {
   try {
-    const { stdout } = await sshExec(
-      'sudo docker stats --no-stream --format "{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}" 2>/dev/null'
-    );
-    if (!stdout) return res.json({ cpu: 0, memMB: 0, memPct: 0, containers: 0, byContainer: {} });
-
-    let totalCpu = 0;
-    let totalUsedMB = 0;
-    let hostMemMB = 0;
-    let count = 0;
-    const byContainer = {};
-
-    for (const line of stdout.split('\n').filter(Boolean)) {
-      const parts = line.split('\t');
-      if (parts.length < 3) continue;
-      const name   = parts[0].trim().toLowerCase();
-      const cpu    = parseFloat(parts[1]) || 0;
-      const memParts = parts[2].split('/');
-      const usedMB = parseDockerMem(memParts[0]);
-      const limitMB = parseDockerMem(memParts[1]);
-      const memPct = limitMB > 0 ? (usedMB / limitMB) * 100 : 0;
-
-      byContainer[name] = {
-        cpu:   Math.round(cpu * 10) / 10,
-        memMB: Math.round(usedMB),
-        memPct: Math.round(memPct * 10) / 10,
-      };
-
-      totalCpu    += cpu;
-      totalUsedMB += usedMB;
-      if (limitMB > hostMemMB) hostMemMB = limitMB;
-      count++;
-    }
-
-    const memPct = hostMemMB > 0 ? (totalUsedMB / hostMemMB) * 100 : 0;
-    res.json({
-      cpu:         Math.round(totalCpu * 10) / 10,
-      memMB:       Math.round(totalUsedMB),
-      memPct:      Math.round(memPct * 10) / 10,
-      containers:  count,
-      byContainer,
-    });
+    const nas = await dockerStats(sshExec);
+    const pi = await dockerStats(localExec);
+    res.json({ ...nas, byContainer: { ...pi.byContainer, ...nas.byContainer } });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -422,4 +465,5 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`Docker Dashboard running on http://0.0.0.0:${PORT}`);
   console.log(`Connecting to TrueNAS at ${process.env.TRUENAS_HOST || '192.168.1.100'}`);
   console.log(`Compose apps directory: ${process.env.COMPOSE_APPS_DIR || '(not set — update .env)'}`);
+  console.log(`Local compose apps directory: ${HOSTS.pi.appsDir()}`);
 });

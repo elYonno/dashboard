@@ -136,3 +136,22 @@ as soon as you start the dashboard.
 | SSH key permission error | Run `chmod 600 /home/pi/.ssh/id_rsa` |
 | Containers not showing | Ensure the SSH user has permission to run `docker` commands |
 | Port 3000 blocked | Change `PORT=` in `.env` or open the port in your firewall |
+
+---
+
+## Home Assistant integration (HACS)
+
+The `custom_components/dockmaster/` folder is a custom integration that talks to this server's API and exposes it in Home Assistant:
+
+- **Sensors:** NAS and Pi CPU %, RAM %, temperature and uptime; NAS container count, CPU and memory.
+- **Binary sensors:** NAS SSH connection, and running state of every compose service.
+- **Switches:** one per app. On starts the app (`docker compose up -d`), off stops it.
+- **Buttons:** start all apps, stop all apps.
+
+### Install
+
+1. In HACS, open **⋮ → Custom repositories**, add this repository URL with category **Integration**.
+2. Install **Dockmaster** from HACS and restart Home Assistant.
+3. Go to **Settings → Devices & services → Add integration → Dockmaster** and enter the address and port this server listens on (default port `3000`, e.g. the Pi's LAN IP).
+
+Home Assistant must be able to reach the server over the LAN. The server has no authentication, so do not expose its port to the internet.

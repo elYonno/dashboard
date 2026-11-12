@@ -11,7 +11,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import DockmasterConfigEntry
 from .coordinator import DockmasterCoordinator
-from .entity import DockmasterEntity, app_device, dashboard_device
+from .entity import DockmasterEntity, app_device, dashboard_device, host_device
 
 
 async def async_setup_entry(
@@ -20,7 +20,9 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator = entry.runtime_data
-    async_add_entities([DockmasterConnectedSensor(coordinator, entry)])
+    entities: list[BinarySensorEntity] = [DockmasterConnectedSensor(coordinator, entry)]
+    entities += [DockmasterHostOnlineSensor(coordinator, entry, host) for host in ("nas", "pi")]
+    async_add_entities(entities)
 
     # One entity per service. Apps can be added on the server at any time,
     # so new ones are discovered on every coordinator update.
@@ -59,6 +61,28 @@ class DockmasterConnectedSensor(DockmasterEntity, BinarySensorEntity):
     @property
     def is_on(self) -> bool:
         return bool(self.coordinator.data["health"].get("connected"))
+
+
+class DockmasterHostOnlineSensor(DockmasterEntity, BinarySensorEntity):
+    """Running/off for a monitored machine: on while its stats can be read.
+
+    Only state changes (up or down) are recorded, unlike a changing value such as uptime.
+    """
+
+    _attr_device_class = BinarySensorDeviceClass.RUNNING
+    _attr_name = "Online"
+
+    def __init__(
+        self, coordinator: DockmasterCoordinator, entry: DockmasterConfigEntry, host: str
+    ) -> None:
+        super().__init__(
+            coordinator, f"{entry.entry_id}_{host}_online", host_device(entry, host)
+        )
+        self._host = host
+
+    @property
+    def is_on(self) -> bool:
+        return self.coordinator.data.get(self._host) is not None
 
 
 class DockmasterServiceSensor(DockmasterEntity, BinarySensorEntity):

@@ -1,4 +1,4 @@
-"""Host and Docker sensors: CPU, RAM, temperature, uptime, container totals."""
+"""Host and Docker sensors: CPU, RAM, temperature, container totals."""
 
 from __future__ import annotations
 
@@ -37,7 +37,6 @@ HOST_SENSORS: tuple[SensorEntityDescription, ...] = (
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         state_class=SensorStateClass.MEASUREMENT,
     ),
-    SensorEntityDescription(key="uptime", name="Uptime"),
 )
 
 # Container totals come from /api/stats, which only reports the NAS.

@@ -51,6 +51,10 @@ class DockmasterClient:
         """Same stats for the device running Dockmaster."""
         return await self._request("GET", "/api/host")
 
+    async def get_pi_ipv6(self) -> dict[str, Any]:
+        """Public IPv6 of the device running Dockmaster: {"ip": str}."""
+        return await self._request("GET", "/api/public-ipv6")
+
     async def get_docker_stats(self) -> dict[str, Any]:
         """Aggregate container CPU and memory on the NAS."""
         return await self._request("GET", "/api/stats")

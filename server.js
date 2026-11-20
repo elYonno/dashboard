@@ -45,20 +45,37 @@ app.post('/api/caddy/:action', async (req, res) => {
   res.json({ success: true, message: `Caddy ${action}ed` });
 });
 
-// --- Public IPv4 of this device (runs on this Pi, cached) ---
+// --- Public IPv4/IPv6 of this device (runs on this Pi, cached) ---
 const PUBLIC_IP_TTL_MS = 5 * 60 * 1000;
-let publicIpCache = { ip: null, fetchedAt: 0 };
+const publicIpCache = { 4: { ip: null, fetchedAt: 0 }, 6: { ip: null, fetchedAt: 0 } };
+const PUBLIC_IP_PATTERNS = {
+  4: /^\d{1,3}(\.\d{1,3}){3}$/,
+  6: /^[0-9a-fA-F:]{2,39}$/,
+};
+
+async function getPublicIp(family) {
+  const cache = publicIpCache[family];
+  if (cache.ip && Date.now() - cache.fetchedAt < PUBLIC_IP_TTL_MS) return cache.ip;
+
+  const { stdout } = await localExec(`curl -${family} -s --max-time 5 https://ifconfig.me`);
+  if (!PUBLIC_IP_PATTERNS[family].test(stdout) || (family === 6 && !stdout.includes(':')))
+    return null;
+
+  cache.ip = stdout;
+  cache.fetchedAt = Date.now();
+  return stdout;
+}
 
 app.get('/api/public-ip', async (req, res) => {
-  if (publicIpCache.ip && Date.now() - publicIpCache.fetchedAt < PUBLIC_IP_TTL_MS)
-    return res.json({ ip: publicIpCache.ip });
+  const ip = await getPublicIp(4);
+  if (!ip) return res.status(502).json({ error: 'Could not determine public IPv4' });
+  res.json({ ip });
+});
 
-  const { stdout } = await localExec('curl -4 -s --max-time 5 https://ifconfig.me');
-  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(stdout))
-    return res.status(502).json({ error: 'Could not determine public IPv4' });
-
-  publicIpCache = { ip: stdout, fetchedAt: Date.now() };
-  res.json({ ip: stdout });
+app.get('/api/public-ipv6', async (req, res) => {
+  const ip = await getPublicIp(6);
+  if (!ip) return res.status(502).json({ error: 'Could not determine public IPv6' });
+  res.json({ ip });
 });
 
 // --- SSH config ---

@@ -77,6 +77,7 @@ async def async_setup_entry(
         DockmasterStatSensor(coordinator, entry, "docker", description)
         for description in DOCKER_SENSORS
     ]
+    entities.append(DockmasterPiIPv6Sensor(coordinator, entry))
     async_add_entities(entities)
 
 
@@ -106,3 +107,28 @@ class DockmasterStatSensor(DockmasterEntity, SensorEntity):
         if payload is None:
             return None
         return payload.get(self.entity_description.key)
+
+
+class DockmasterPiIPv6Sensor(DockmasterEntity, SensorEntity):
+    """Public IPv6 address of the Pi running Dockmaster (text state)."""
+
+    _attr_name = "IPv6 address"
+    _attr_icon = "mdi:ip-network"
+
+    def __init__(
+        self,
+        coordinator: DockmasterCoordinator,
+        entry: DockmasterConfigEntry,
+    ) -> None:
+        super().__init__(
+            coordinator,
+            f"{entry.entry_id}_pi_public_ipv6",
+            host_device(entry, "pi"),
+        )
+
+    @property
+    def native_value(self):
+        payload = self.coordinator.data.get("pi_ipv6")
+        if payload is None:
+            return None
+        return payload.get("ip")

@@ -43,9 +43,10 @@ class DockmasterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Host stats are optional, so one failing source (e.g. NAS SSH down)
         # does not make every entity unavailable.
-        nas, pi, docker = await asyncio.gather(
+        nas, pi, pi_ipv6, docker = await asyncio.gather(
             _optional(self.client.get_nas_stats()),
             _optional(self.client.get_pi_stats()),
+            _optional(self.client.get_pi_ipv6()),
             _optional(self.client.get_docker_stats()),
         )
         return {
@@ -53,6 +54,7 @@ class DockmasterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "health": health,
             "nas": nas,
             "pi": pi,
+            "pi_ipv6": pi_ipv6,
             "docker": docker,
         }
 
